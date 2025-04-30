@@ -61,37 +61,6 @@ def parse_ebpf_line(line):
         print(f"Failed to parse eBPF line: {line.strip()}. Error: {e}")
         return None
 
-# def parse_strace_line(line):
-#     try:
-#         # Example: 14:52:10.123456 execve("/usr/bin/python3", ["python3", "script.py"], 0x7ffc1234) = 0
-#         match = re.match(r'(\d+:\d+:\d+\.\d+)\s+execve\("([^"]+)", \[(.*?)\], .*?\)', line.strip())
-#         if not match:
-#             return None
-
-#         timestamp_str, command, args_str = match.groups()
-
-#         # Parse timestamp
-#         timestamp = datetime.strptime(timestamp_str, "%H:%M:%S.%f")
-#         today = datetime.now(timezone.utc).date()
-#         timestamp_start = datetime.combine(today, timestamp.time(), tzinfo=timezone.utc)
-
-#         # Parse arguments
-#         args = []
-#         if args_str:
-#             args = [arg.strip('"') for arg in args_str.split(', ') if arg.strip()]
-
-#         return Event(
-#             pid=None,  # We will assign PID later if available from filename
-#             timestamp_start=timestamp_start,
-#             command=command,
-#             arguments=args,
-#             source="strace"
-#         )
-
-#     except Exception as e:
-#         print(f"Failed to parse strace line: {line.strip()}. Error: {e}")
-#         return None
-
 def parse_strace_file(filepath):
     try:
         with open(filepath, "r") as f:
