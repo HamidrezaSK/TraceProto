@@ -184,6 +184,7 @@ def main():
                     run_pipeline_with_ebpf(pipeline_name, pipeline_path, session_dir, run_id)
 
         time.sleep(1)
+    print(f"SESSION_PATH::{session_dir}")
 
 if __name__ == "__main__":
     main()
