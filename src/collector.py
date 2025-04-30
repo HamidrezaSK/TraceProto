@@ -17,7 +17,7 @@ PIPELINES = {
     "pipeline-2": os.path.join(CURRENT_DIR, "../pipelines/pipeline_2.sh")
 }
 
-NUM_RUNS = 1
+NUM_RUNS = 10
 
 # --- System Top Collector Thread ---
 def collect_system_top(output_file, stop_event, interval_sec=0.1):

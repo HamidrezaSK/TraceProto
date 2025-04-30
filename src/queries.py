@@ -9,33 +9,21 @@ def compute_avg_duration_per_command(db_path):
     con = duckdb.connect(database=db_path, read_only=True)
 
     df = con.execute("""
-        SELECT pid, command, timestamp_start
+        SELECT command, duration_sec
         FROM events
-        WHERE source = 'strace' AND pid IS NOT NULL
+        WHERE source = 'strace' AND duration_sec IS NOT NULL
     """).fetchdf()
 
     con.close()
 
     if df.empty:
-        print("No strace events found.")
+        print("No strace durations found.")
         return pd.DataFrame()
 
-    # Group by PID to calculate duration per process
-    grouped = df.groupby('pid')
-    durations = []
-
-    for pid, group in grouped:
-        start_time = group['timestamp_start'].min()
-        end_time = group['timestamp_start'].max()
-        duration_sec = (end_time - start_time).total_seconds()
-        command = group.sort_values('timestamp_start').iloc[0]['command']
-        durations.append({'command': command, 'duration_sec': duration_sec})
-
-    durations_df = pd.DataFrame(durations)
-    result = durations_df.groupby('command').agg(avg_duration_sec=('duration_sec', 'mean')).reset_index()
+    result = df.groupby("command").agg(avg_duration_sec=("duration_sec", "mean")).reset_index()
 
     print("\nAverage Execution Time per Command (seconds):")
-    print(result.sort_values('avg_duration_sec', ascending=False))
+    print(result.sort_values("avg_duration_sec", ascending=False))
 
     return result
 

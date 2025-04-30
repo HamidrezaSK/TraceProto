@@ -18,6 +18,7 @@ class Event:
     command: str
     arguments: list
     source: str  # 'strace' or 'ebpf'
+    duration_sec: float = None
 
 # --- Ingestion Helpers ---
 def find_trace_files(session_dir):
@@ -60,35 +61,94 @@ def parse_ebpf_line(line):
         print(f"Failed to parse eBPF line: {line.strip()}. Error: {e}")
         return None
 
-def parse_strace_line(line):
+# def parse_strace_line(line):
+#     try:
+#         # Example: 14:52:10.123456 execve("/usr/bin/python3", ["python3", "script.py"], 0x7ffc1234) = 0
+#         match = re.match(r'(\d+:\d+:\d+\.\d+)\s+execve\("([^"]+)", \[(.*?)\], .*?\)', line.strip())
+#         if not match:
+#             return None
+
+#         timestamp_str, command, args_str = match.groups()
+
+#         # Parse timestamp
+#         timestamp = datetime.strptime(timestamp_str, "%H:%M:%S.%f")
+#         today = datetime.now(timezone.utc).date()
+#         timestamp_start = datetime.combine(today, timestamp.time(), tzinfo=timezone.utc)
+
+#         # Parse arguments
+#         args = []
+#         if args_str:
+#             args = [arg.strip('"') for arg in args_str.split(', ') if arg.strip()]
+
+#         return Event(
+#             pid=None,  # We will assign PID later if available from filename
+#             timestamp_start=timestamp_start,
+#             command=command,
+#             arguments=args,
+#             source="strace"
+#         )
+
+#     except Exception as e:
+#         print(f"Failed to parse strace line: {line.strip()}. Error: {e}")
+#         return None
+
+def parse_strace_file(filepath):
     try:
-        # Example: 14:52:10.123456 execve("/usr/bin/python3", ["python3", "script.py"], 0x7ffc1234) = 0
-        match = re.match(r'(\d+:\d+:\d+\.\d+)\s+execve\("([^"]+)", \[(.*?)\], .*?\)', line.strip())
-        if not match:
+        with open(filepath, "r") as f:
+            lines = f.readlines()
+
+        if not lines:
             return None
 
-        timestamp_str, command, args_str = match.groups()
+        filename = os.path.basename(filepath)
+        pid = None
+        if '.' in filename:
+            try:
+                pid = int(filename.split('.')[-1])
+            except ValueError:
+                pass
 
-        # Parse timestamp
-        timestamp = datetime.strptime(timestamp_str, "%H:%M:%S.%f")
-        today = datetime.now(timezone.utc).date()
-        timestamp_start = datetime.combine(today, timestamp.time(), tzinfo=timezone.utc)
+        # Find start (first execve) and end (last timestamp)
+        execve_re = re.compile(r'^(\d+:\d+:\d+\.\d+)\s+execve\("([^"]+)", \[(.*?)\],')
+        killed_re = re.compile(r'^(\d+:\d+:\d+\.\d+)\s+\+\+\+ killed by')
 
-        # Parse arguments
-        args = []
-        if args_str:
-            args = [arg.strip('"') for arg in args_str.split(', ') if arg.strip()]
+        start_time, end_time, command, arguments = None, None, None, []
+
+        for line in lines:
+            exec_match = execve_re.match(line)
+            if exec_match and not start_time:
+                ts_str, command, args_str = exec_match.groups()
+                timestamp = datetime.strptime(ts_str, "%H:%M:%S.%f")
+                today = datetime.now(timezone.utc).date()
+                start_time = datetime.combine(today, timestamp.time(), tzinfo=timezone.utc)
+
+                if args_str:
+                    arguments = [arg.strip('"') for arg in args_str.split(', ') if arg]
+
+            if 'killed by' in line or 'exited' in line:
+                match = killed_re.match(line)
+                if match:
+                    ts_str = match.group(1)
+                    timestamp = datetime.strptime(ts_str, "%H:%M:%S.%f")
+                    today = datetime.now(timezone.utc).date()
+                    end_time = datetime.combine(today, timestamp.time(), tzinfo=timezone.utc)
+
+        if not start_time or not command:
+            return None
+
+        duration_sec = (end_time - start_time).total_seconds() if end_time else None
 
         return Event(
-            pid=None,  # We will assign PID later if available from filename
-            timestamp_start=timestamp_start,
+            pid=pid,
+            timestamp_start=start_time,
             command=command,
-            arguments=args,
-            source="strace"
+            arguments=arguments,
+            source="strace",
+            duration_sec=duration_sec
         )
 
     except Exception as e:
-        print(f"Failed to parse strace line: {line.strip()}. Error: {e}")
+        print(f"Failed to parse strace file {filepath}: {e}")
         return None
 
 # --- Filtering Function ---
@@ -109,32 +169,20 @@ def process_session(session_dir, mode):
     all_events = []
 
     def process_file(file_path):
-        local_events = []
-        filename = os.path.basename(file_path)
-
-        # Infer PID if strace mode and -ff used
-        inferred_pid = None
-        if mode == "strace" and '.' in filename:
-            try:
-                inferred_pid = int(filename.split('.')[-1])
-            except ValueError:
-                inferred_pid = None
-
-        lines = read_trace_file(file_path)
-        for line in lines:
-            if mode == "strace":
-                event = parse_strace_line(line)
-                if event:
-                    event.pid = inferred_pid  # Assign inferred PID
-            else:  # ebpf
+        if mode == "strace":
+            event = parse_strace_file(file_path)
+            return [event] if event else []
+        else:
+            # eBPF case
+            local_events = []
+            lines = read_trace_file(file_path)
+            for line in lines:
                 event = parse_ebpf_line(line)
+                if event and filter_event(event):
+                    local_events.append(event)
+            return local_events
 
-            if event and filter_event(event):
-                local_events.append(event)
-
-        return local_events
-
-    # Optional: Parallel parsing
+    # Parallel parsing
     with ThreadPoolExecutor() as executor:
         futures = [executor.submit(process_file, file) for file in trace_files]
         for f in futures:
