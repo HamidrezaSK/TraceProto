@@ -3,7 +3,6 @@ import os
 import time
 import argparse
 import threading
-import psutil
 import csv
 from datetime import datetime, timezone
 import tempfile
@@ -20,17 +19,41 @@ PIPELINES = {
 
 NUM_RUNS = 1
 
-# --- Metrics Collector Thread ---
-def collect_metrics(stop_event, output_file):
+# --- System Top Collector Thread ---
+def collect_system_top(output_file, stop_event, interval_sec=0.1):
     with open(output_file, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["timestamp", "cpu_percent", "mem_used_mb"])
+        writer.writerow(["timestamp_utc", "pid", "cpu_percent", "mem_percent", "command"])
 
         while not stop_event.is_set():
-            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")
-            cpu = psutil.cpu_percent(interval=1)
-            mem = psutil.virtual_memory().used / (1024 * 1024)
-            writer.writerow([timestamp, cpu, round(mem, 2)])
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f %Z")
+
+            try:
+                result = subprocess.run(
+                    ["top", "-b", "-n", "1"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True
+                )
+
+                lines = result.stdout.splitlines()
+                header_found = False
+                for line in lines:
+                    if line.strip().startswith("PID"):
+                        header_found = True
+                        continue
+                    if header_found and line.strip():
+                        cols = line.split()
+                        if len(cols) >= 12:
+                            pid = cols[0]
+                            cpu = cols[8]
+                            mem = cols[9]
+                            cmd = cols[11]
+                            writer.writerow([timestamp, pid, cpu, mem, cmd])
+            except Exception as e:
+                print(f"Error collecting top: {e}")
+
+            time.sleep(interval_sec)
 
 # --- Session Directory ---
 def create_session_directory(mode):
@@ -48,11 +71,14 @@ def run_pipeline_with_strace(pipeline_name, pipeline_path, session_dir, run_id):
     print(f"Running {pipeline_name} (Run {run_id}) with strace...")
 
     stop_event = threading.Event()
-    metrics_thread = threading.Thread(target=collect_metrics, args=(stop_event, metrics_file))
+    metrics_thread = threading.Thread(
+        target=collect_system_top,
+        args=(metrics_file, stop_event)
+    )
     metrics_thread.start()
 
     cmd = [
-        "strace", "-f", "-tt",
+        "strace", "-ff", "-tt",
         "-e", "trace=execve",
         "-o", trace_file,
         "bash", pipeline_path
@@ -73,7 +99,10 @@ def run_pipeline_with_ebpf(pipeline_name, pipeline_path, session_dir, run_id):
     print(f"Running {pipeline_name} (Run {run_id}) with eBPF...")
 
     stop_event = threading.Event()
-    metrics_thread = threading.Thread(target=collect_metrics, args=(stop_event, metrics_file))
+    metrics_thread = threading.Thread(
+        target=collect_system_top,
+        args=(metrics_file, stop_event)
+    )
     metrics_thread.start()
 
     bpftrace_script = '''
