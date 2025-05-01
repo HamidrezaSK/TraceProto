@@ -7,6 +7,7 @@ This repository contains an observability pipeline that simulates, collects, pro
 ## Table of Contents
 
 1. [Overview](#1-overview)  
+1.1 [Demo](#11-demo)  
 2. [Architecture](#2-architecture)  
 3. [How to Run](#3-how-to-run)  
 4. [Component Breakdown](#4-component-breakdown)  
@@ -32,6 +33,14 @@ It uses:
 - **`strace`** and **`bpftrace`** for signal collection
 - **`top`** for live system-wide CPU/memory sampling
 - **DuckDB** for structured data storage and querying
+
+---
+
+### 1.1 Demo
+
+Below is a short demonstration of the full pipeline in action:
+
+![Demo](./docs/screenshots/demo.gif)
 
 ---
 
