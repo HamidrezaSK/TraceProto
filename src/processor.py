@@ -33,6 +33,53 @@ def read_trace_file(filepath):
 # Calculate boot time for eBPF timestamps
 boot_time = datetime.fromtimestamp(psutil.boot_time(), tz=timezone.utc)
 
+def parse_enhanced_ebpf_trace(trace_file_path):
+    start_map = {}
+    end_map = {}
+    events = []
+
+    with open(trace_file_path, "r") as f:
+        for line in f:
+            parts = line.strip().split()
+            if not parts:
+                continue
+
+            if parts[0] == "START" and len(parts) >= 4:
+                pid = int(parts[1])
+                nsecs = int(parts[2])
+                command = parts[3]
+                args = [arg for arg in parts[4:] if arg != "(null)"]
+                start_map[pid] = {
+                    "timestamp": boot_time + timedelta(microseconds=nsecs // 1000),
+                    "command": command,
+                    "args": args,
+                    "raw_nsecs": nsecs
+                }
+
+            elif parts[0] == "END" and len(parts) >= 3:
+                pid = int(parts[1])
+                nsecs = int(parts[2])
+                end_map[pid] = nsecs
+
+    for pid in start_map:
+        start_info = start_map[pid]
+        end_nsecs = end_map.get(pid)
+        duration_sec = None
+        if end_nsecs:
+            duration_sec = (end_nsecs - start_info["raw_nsecs"]) / 1e9
+
+        event = Event(
+            pid=pid,
+            timestamp_start=start_info["timestamp"],
+            command=start_info["command"],
+            arguments=start_info["args"],
+            source="ebpf",
+            duration_sec=duration_sec
+        )
+        events.append(event)
+
+    return events
+
 def parse_ebpf_line(line):
     try:
         parts = line.strip().split()
@@ -143,13 +190,16 @@ def process_session(session_dir, mode):
             return [event] if event else []
         else:
             # eBPF case
-            local_events = []
-            lines = read_trace_file(file_path)
-            for line in lines:
+            if os.path.basename(file_path) == "ebpf-global-trace.txt":
+                return parse_enhanced_ebpf_trace(file_path)
+
+            # Otherwise fallback to original eBPF line-based parser
+            events = []
+            for line in read_trace_file(file_path):
                 event = parse_ebpf_line(line)
                 if event and filter_event(event):
-                    local_events.append(event)
-            return local_events
+                    events.append(event)
+            return events
 
     # Parallel parsing
     with ThreadPoolExecutor() as executor:

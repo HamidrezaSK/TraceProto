@@ -99,6 +99,7 @@ Results are written to CSV for submission clarity.
 ## 5. Design Decisions
 
 ### Collector (`collector.py`)
+- **Anomaly monitoring:** A temporary not tested `sys_exit_execve`-based anomaly monitor was implemented to log failed `execve()` calls. While it effectively detects execution failures, it does not provide end timestamps for successful executions due to how `execve()` replaces the calling process. This behavior is documented in the `execve(2)` man page and confirmed through testing. As a result, we rely on `sched:sched_process_exit` to accurately determine when a binary finishes execution.
 - **Mode-based collection:** Supports both `strace` and `eBPF` modes via CLI flag, enabling future integration with tools like `perf`, `ptrace`, or custom eBPF probes.
 - **Process-level trace separation:** Uses `strace -ff` to generate one trace file per PID, supporting clean duration extraction and better event traceability.
 - **System-wide sampling:** Runs `top` globally at high frequency (every 0.1s) during pipeline execution, capturing per-process CPU and memory metrics.
@@ -171,16 +172,20 @@ pip install -r requirements.txt
 
 ### Challenges
 
-- **eBPF duration tracking limitations:** The current implementation only hooks into `sys_enter_execve`, which does not expose process exits. This prevents duration tracking for eBPF-based events.
+- **execve syscall exit limitation:** Initially, `tracepoint:syscalls:sys_exit_execve` was evaluated as a way to track the end of binary execution. However, as the Linux man page for `execve(2)` notes:
+
+  > *execve() does not return on success, and the text, initialized data, uninitialized data (bss), and stack of the calling process are overwritten according to the contents of the newly loaded program.*
+
+  This means that `sys_exit_execve` is only triggered for **failed** exec attempts. In practice, the anomaly log (`anomaly-log.txt`) remains empty for normal workloads. This led to adopting `sched:sched_process_exit` instead, which reliably triggers when a process exits and allows us to compute execution durations.
 - **Short-lived process visibility:** Some binaries execute and terminate in under 100ms. Even with 0.1s sampling, we may miss brief process activity.
 - **System-level noise:** On small instances like `t2.micro`, background OS activity may interfere with accurate metric collection, particularly when using `top` system-wide.
 
 ### Future Work
 
-- eBPF parallel pipeline
-- Extend eBPF collection to infer binary end times
+- <s>eBPF parallel pipeline</s>
+- <s>Extend eBPF collection to infer binary end times</s>
+- <s>Implement anomaly detection</s>, and warning raise mechanism
 - Add memory usage aggregation per binary
-- Implement anomaly detection, and warning raise mechanism
 - Complete filter_event support
 - Add bioinformatics pipeline
 - Export DuckDB queries to a web dashboard for real-time insight
