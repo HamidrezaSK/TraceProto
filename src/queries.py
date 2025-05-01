@@ -11,7 +11,7 @@ def compute_avg_duration_per_command(db_path):
     df = con.execute("""
         SELECT command, duration_sec
         FROM events
-        WHERE source = 'strace' AND duration_sec IS NOT NULL
+        WHERE duration_sec IS NOT NULL
     """).fetchdf()
 
     con.close()
