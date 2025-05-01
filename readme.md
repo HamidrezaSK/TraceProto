@@ -4,6 +4,20 @@ This repository contains an observability pipeline that simulates, collects, pro
 
 ---
 
+## Table of Contents
+
+1. [Overview](#1-overview)  
+2. [Architecture](#2-architecture)  
+3. [How to Run](#3-how-to-run)  
+4. [Component Breakdown](#4-component-breakdown)  
+5. [Design Decisions](#5-design-decisions)
+6. [Query Construction](#6-query-construction)
+7. [Dependencies](#7-dependencies)  
+8. [Challenges and Future Work](#8-challenges-and-future-work)  
+9. [Test Environment & Results](#9-test-environment--results)  
+
+---
+
 ## 1. Overview
 
 The system is designed to:
@@ -37,7 +51,7 @@ The pipeline consists of four main components:
 4. **Queries** (`queries.py`)  
    Runs Tracer's required queries on the structured data and exports the results as CSV files.
 
-![Alt text](images/ArchDiagram.png)
+![Architecture](docs/diagrams/ArchDiagram.png)
 
 
 ---
@@ -105,7 +119,30 @@ Results are written to CSV for submission clarity.
 
 ---
 
-## 6. Dependencies
+## 6. Query Construction
+
+### Query 1 – Average Execution Duration per Command
+- **Source:** `events.duckdb`, generated from `strace` mode
+- **Fields used:** `command`, `timestamp_start`, `duration_sec`
+- **Logic:**
+  - Each PID has exactly one `Event` with a `duration_sec` computed from the difference between the first `execve()` and the last observed event (typically `+++ killed by SIGTERM +++`)
+  - Grouped by `command`, and averaged across all processes
+- **Assumptions:**
+  - We assume one main binary per pipeline trace and accurate end markers in strace
+
+### Query 2 – Top Commands by CPU Usage
+- **Sources:** `events.duckdb`, merged with `*-metrics.csv`
+- **Fields used:** `pid`, `command` (from events), `cpu_percent` (from metrics)
+- **Logic:**
+  - Metrics sampled system-wide using `top`, filtered to include only PIDs traced during collection
+  - Samples <1% CPU were excluded to reduce noise
+  - CPU usage per sample is normalized by interval and aggregated by command
+- **Assumptions:**
+  - Sampling interval is 0.1s, and CPU percentage is normalized across 100% per core
+
+---
+
+## 7. Dependencies
 
 - Python 3.10+
 - `strace`
@@ -130,11 +167,39 @@ pip install -r requirements.txt
 
 ---
 
-## 7. Future Work
+## 8. Challenges and Future Work
 
+### Challenges
+
+- **eBPF duration tracking limitations:** The current implementation only hooks into `sys_enter_execve`, which does not expose process exits. This prevents duration tracking for eBPF-based events.
+- **Short-lived process visibility:** Some binaries execute and terminate in under 100ms. Even with 0.1s sampling, we may miss brief process activity.
+- **System-level noise:** On small instances like `t2.micro`, background OS activity may interfere with accurate metric collection, particularly when using `top` system-wide.
+
+### Future Work
+
+- eBPF parallel pipeline
 - Extend eBPF collection to infer binary end times
 - Add memory usage aggregation per binary
+- Implement anomaly detection, and warning raise mechanism
 - Complete filter_event support
-- Implement anomaly detection
 - Add bioinformatics pipeline
 - Export DuckDB queries to a web dashboard for real-time insight
+
+---
+
+## 9. Test Environment & Results
+
+All components were tested in a live environment on an AWS EC2 instance:
+
+- **Platform:** AWS EC2
+- **Instance type:** t3.micro (Free Tier)
+- **OS:** Ubuntu 22.04 LTS
+
+During testing, I ran both `make strace` and `make ebpf` to validate pipeline correctness. Example outputs (including screenshots of terminal sessions and result files) can be found in the `docs/screenshots/` directory:
+
+- `make strace` execution
+- `duckdb` CLI preview of `events`
+- `query1_avg_duration.csv` preview
+- `query2_cpu_hours.csv` preview
+
+These demonstrate that the full data pipeline executed correctly and produced meaningful outputs from real trace + metrics data.
