@@ -1,3 +1,4 @@
+# --- Imports ---
 import subprocess
 import os
 import time
@@ -6,7 +7,43 @@ import threading
 import csv
 from datetime import datetime, timezone
 import tempfile
-# --- Imports ---
+
+# --- Constants ---
+# eBPF script to trace execve system calls
+ENHANCED_BPFTRACE_SCRIPT = '''
+BEGIN {
+    printf("TRACE_START\\n");
+}
+
+tracepoint:syscalls:sys_enter_execve
+{
+    @start[pid] = nsecs;
+    printf("START %d %lld %s %s %s %s\\n",
+        pid,
+        nsecs,
+        str(args->filename),
+        str(args->argv[0]),
+        str(args->argv[1]),
+        str(args->argv[2]));
+}
+
+tracepoint:sched:sched_process_exit
+/@start[pid]/
+{
+    printf("END %d %lld\\n", pid, nsecs);
+    delete(@start[pid]);
+}
+'''
+
+ANOMALY_BPFTRACE_SCRIPT = '''
+tracepoint:syscalls:sys_exit_execve
+/args->ret < 0/
+{
+    printf("FAILED execve pid=%d ret=%d\n", pid, args->ret);
+}
+'''
+
+NUM_RUNS = 10
 
 # --- Setup Paths ---
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -16,8 +53,6 @@ PIPELINES = {
     "pipeline-1": os.path.join(CURRENT_DIR, "../pipelines/pipeline_1.sh"),
     "pipeline-2": os.path.join(CURRENT_DIR, "../pipelines/pipeline_2.sh")
 }
-
-NUM_RUNS = 10
 
 # --- System Top Collector Thread ---
 def collect_system_top(output_file, stop_event, interval_sec=0.1):
@@ -105,31 +140,45 @@ def run_pipeline_with_ebpf(pipeline_name, pipeline_path, session_dir, run_id):
     )
     metrics_thread.start()
 
-    bpftrace_script = '''
-        tracepoint:syscalls:sys_enter_execve
-        {
-            printf("%lld %d exec %s", nsecs, pid, str(args->filename));
-            printf(" %s", str(args->argv[0]));
-            printf(" %s", str(args->argv[1]));
-            printf(" %s", str(args->argv[2]));
-            printf("\\n");
-        }
-    '''
+    # Deprecated: Original bpftrace script
+    # bpftrace_script = '''
+    #     tracepoint:syscalls:sys_enter_execve
+    #     {
+    #         printf("%lld %d exec %s", nsecs, pid, str(args->filename));
+    #         printf(" %s", str(args->argv[0]));
+    #         printf(" %s", str(args->argv[1]));
+    #         printf(" %s", str(args->argv[2]));
+    #         printf("\\n");
+    #     }
+    # '''
 
     # Use a temp file for bpftrace output
     with tempfile.NamedTemporaryFile("w+", delete=False) as tmp:
         tmp_path = tmp.name
         tmp.close()
 
-    with open(tmp_path, "w", buffering=1) as tmp_out:
+    # Write bpftrace script to temp file
+    with tempfile.NamedTemporaryFile("w+", delete=False) as f:
+        f.write(ENHANCED_BPFTRACE_SCRIPT)
+        script_path = f.name
+
+    with open(trace_file, "w", buffering=1) as trace_out:
         bpftrace_proc = subprocess.Popen(
-            ["sudo", "bpftrace", "-e", bpftrace_script],
-            stdout=tmp_out,
+            ["sudo", "bpftrace", script_path],
+            stdout=trace_out,
             stderr=subprocess.DEVNULL,
             text=True
         )
 
-        time.sleep(2)  # Give bpftrace time to attach
+    # with open(tmp_path, "w", buffering=1) as tmp_out:
+    #     bpftrace_proc = subprocess.Popen(
+    #         ["sudo", "bpftrace", "-e", bpftrace_script],
+    #         stdout=tmp_out,
+    #         stderr=subprocess.DEVNULL,
+    #         text=True
+    #     )
+
+        time.sleep(1)  # Give bpftrace time to attach
 
         pipeline_proc = subprocess.Popen(["bash", pipeline_path],
                                          stdout=subprocess.DEVNULL,
@@ -145,12 +194,84 @@ def run_pipeline_with_ebpf(pipeline_name, pipeline_path, session_dir, run_id):
         f_out.write(f_in.read())
 
     os.remove(tmp_path)
+    os.remove(script_path)
 
     stop_event.set()
     metrics_thread.join()
 
     print(f"Trace:   {trace_file}")
     print(f"Metrics: {metrics_file}")
+
+# --- Enhanced BPFTrace Script ---
+def run_all_pipelines_with_ebpf(session_dir):
+    trace_file = os.path.join(session_dir, "ebpf-global-trace.txt")
+    metrics_file = os.path.join(session_dir, "ebpf-global-metrics.csv")
+
+    print(f"Running all pipelines in parallel with global eBPF...")
+
+    stop_event = threading.Event()
+    metrics_thread = threading.Thread(
+        target=collect_system_top,
+        args=(metrics_file, stop_event)
+    )
+    metrics_thread.start()
+
+    # Write bpftrace script to temp file
+    with tempfile.NamedTemporaryFile("w+", delete=False) as f:
+        f.write(ENHANCED_BPFTRACE_SCRIPT)
+        script_path = f.name
+
+    with open(trace_file, "w", buffering=1) as trace_out:
+        bpftrace_proc = subprocess.Popen(
+            ["sudo", "bpftrace", script_path],
+            stdout=trace_out,
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+        anomaly_proc, anomaly_script_path = start_anomaly_monitor(session_dir)
+        time.sleep(1)  # Give bpftrace time to attach
+
+        # Run all pipelines in parallel
+        procs = []
+        for pipeline_path in PIPELINES.values():
+            p = subprocess.Popen(["bash", pipeline_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            procs.append(p)
+
+        for p in procs:
+            p.wait()
+
+        stop_event.set()
+        metrics_thread.join()
+
+        time.sleep(1)  # Let bpftrace flush final events
+        bpftrace_proc.terminate()
+        bpftrace_proc.wait()
+
+        anomaly_proc.terminate()
+        anomaly_proc.wait()
+        os.remove(anomaly_script_path)
+        print(f"Anomaly log written to: {os.path.join(session_dir, 'anomaly-log.txt')}")
+
+    os.remove(script_path)
+
+    print(f"Trace:   {trace_file}")
+    print(f"Metrics: {metrics_file}")
+
+def start_anomaly_monitor(session_dir):
+    log_file = os.path.join(session_dir, "anomaly-log.txt")
+
+    with tempfile.NamedTemporaryFile("w+", delete=False) as f:
+        f.write(ANOMALY_BPFTRACE_SCRIPT)
+        script_path = f.name
+
+    anomaly_proc = subprocess.Popen(
+        ["sudo", "bpftrace", script_path],
+        stdout=open(log_file, "w"),
+        stderr=subprocess.DEVNULL,
+        text=True
+    )
+
+    return anomaly_proc, script_path
 
 # --- Main ---
 def main():
@@ -163,18 +284,19 @@ def main():
     print(f"Session directory created at: {session_dir}")
 
     for run_id in range(1, NUM_RUNS + 1):
-        if args.parallel and args.mode == "strace":
+        if args.parallel:
             # Parallel mode
-            processes = []
-            for pipeline_name, pipeline_path in PIPELINES.items():
-                p = threading.Thread(target=run_pipeline_with_strace, args=(pipeline_name, pipeline_path, session_dir, run_id))
-                p.start()
-                processes.append(p)
-
-            # Wait for all to finish
-            for p in processes:
-                p.join()
-
+            if args.mode == "strace":
+                processes = []
+                for pipeline_name, pipeline_path in PIPELINES.items():
+                    p = threading.Thread(target=run_pipeline_with_strace, args=(pipeline_name, pipeline_path, session_dir, run_id))
+                    p.start()
+                    processes.append(p)
+                # Wait for all to finish
+                for p in processes:
+                    p.join()
+            elif args.mode == "ebpf":
+                run_all_pipelines_with_ebpf(session_dir)
         else:
             # Serial mode (default)
             for pipeline_name, pipeline_path in PIPELINES.items():
